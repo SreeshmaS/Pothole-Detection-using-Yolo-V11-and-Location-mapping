@@ -1,0 +1,247 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pothole Detection</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <style>
+        #map {
+            height: 400px;
+            width: 100%;
+            margin-top: 20px;
+        }
+        #result-image {
+            max-width: 100%;
+            margin-top: 20px;
+        }
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+        .success {
+            color: green;
+            margin-top: 10px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Pothole Detection with Location</h1>
+        
+        <div class="form-group">
+            <form id="upload-form">
+                <input type="file" name="file" accept=".jpg,.jpeg,.png" required>
+                <button type="submit">Upload and Detect</button>
+            </form>
+        </div>
+
+        <div id="message"></div>
+        <div id="gps-message"></div>
+        <img id="result-image" style="display: none;">
+        <div id="map"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script>
+        // Initialize the map
+        var map = L.map('map').setView([0, 0], 2);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+    
+        var marker = null;
+        var markersList = []; // Store all markers for history
+    
+        async function loadPotholeHistory() {
+            try {
+                const response = await fetch('/history');
+                const data = await response.json();
+    
+                // Clear existing history markers
+                markersList.forEach(m => map.removeLayer(m));
+                markersList = [];
+    
+                data.forEach(({ latitude, longitude, count }) => {
+                    let historyMarker = L.marker([latitude, longitude]).addTo(map);
+                    historyMarker.bindPopup(`Pothole detected ${count} times<br>Lat: ${latitude}, Long: ${longitude}`).openPopup();
+                    markersList.push(historyMarker); // Store in list
+                });
+            } catch (error) {
+                console.error("Error loading pothole history:", error);
+            }
+        }
+    
+        document.addEventListener("DOMContentLoaded", loadPotholeHistory);
+    
+        function showMessage(message, isError = false) {
+            const messageElement = document.getElementById('message');
+            messageElement.textContent = message;
+            messageElement.className = isError ? 'error' : 'success';
+        }
+    
+        function showGPSMessage(message, isError = false) {
+            const gpsMessageElement = document.getElementById('gps-message');
+            gpsMessageElement.textContent = message;
+            gpsMessageElement.className = isError ? 'error' : 'success';
+        }
+    
+        function updateMap(gpsData) {
+            document.getElementById('gps-message').textContent = ''; // Clear GPS message
+        
+            // If GPS data is extracted from EXIF/OCR
+            if (gpsData && gpsData.latitude !== null && gpsData.longitude !== null && gpsData.source !== "live_location") {
+                const { latitude, longitude } = gpsData;
+                
+                // Remove previous marker if exists
+                if (marker) map.removeLayer(marker);
+        
+                marker = L.marker([latitude, longitude]).addTo(map);
+                map.setView([latitude, longitude], 15);
+                marker.bindPopup(`Pothole Location<br>Lat: ${latitude}<br>Long: ${longitude}`).openPopup();
+                showGPSMessage(`Location detected at: ${latitude}, ${longitude}`, false);
+        
+                // Reload history to reflect new entry
+                loadPotholeHistory();
+            } 
+            else {
+                // Use live location
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        async (position) => {
+                            const lat = position.coords.latitude;
+                            const lon = position.coords.longitude;
+        
+                            // Remove previous marker if exists
+                            if (marker) map.removeLayer(marker);
+        
+                            marker = L.marker([lat, lon]).addTo(map);
+                            map.setView([lat, lon], 15);
+                            marker.bindPopup(`Pothole Location (Live)<br>Lat: ${lat}<br>Long: ${lon}`).openPopup();
+                            showGPSMessage(`Live location: ${lat}, ${lon}`, false);
+        
+                            // The location will be saved when the prediction is made
+                            // Reload history to show new marker
+                            loadPotholeHistory();
+                        },
+                        (error) => {
+                            showGPSMessage("Error getting live location: " + error.message, true);
+                        },
+                        {
+                            enableHighAccuracy: true,
+                            timeout: 5000,
+                            maximumAge: 0
+                        }
+                    );
+                } else {
+                    showGPSMessage("Geolocation is not supported by your browser.", true);
+                }
+            }
+        }
+        document.getElementById('upload-form').onsubmit = async function(e) {
+            e.preventDefault();
+            
+            try {
+                const fileInput = document.querySelector('input[type="file"]');
+                if (!fileInput.files.length) {
+                    showMessage('Please select a file', true);
+                    return;
+                }
+        
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+        
+                // Upload the file
+                const uploadResponse = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const uploadData = await uploadResponse.json();
+                
+                if (uploadData.error) {
+                    throw new Error(uploadData.error);
+                }
+        
+                // Get live location if needed
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        async (position) => {
+                            const predictFormData = new FormData();
+                            predictFormData.append('filename', uploadData.filename);
+                            predictFormData.append('latitude', position.coords.latitude);
+                            predictFormData.append('longitude', position.coords.longitude);
+                            
+                            const predictResponse = await fetch('/predict', {
+                                method: 'POST',
+                                body: predictFormData
+                            });
+                            const predictData = await predictResponse.json();
+        
+                            if (predictData.error) {
+                                throw new Error(predictData.error);
+                            }
+        
+                            // Display detection results
+                            showMessage(predictData.message);
+        
+                            // Display result image
+                            const resultImage = document.getElementById('result-image');
+                            resultImage.src = '/static/uploads/' + predictData.result_image;
+                            resultImage.style.display = 'block';
+        
+                            // Update map with GPS data
+                            updateMap(predictData.gps_data);
+                        },
+                        (error) => {
+                            showGPSMessage("Error getting live location: " + error.message, true);
+                        }
+                    );
+                } else {
+                    // Proceed without location
+                    const predictFormData = new FormData();
+                    predictFormData.append('filename', uploadData.filename);
+                    
+                    const predictResponse = await fetch('/predict', {
+                        method: 'POST',
+                        body: predictFormData
+                    });
+                    const predictData = await predictResponse.json();
+        
+                    if (predictData.error) {
+                        throw new Error(predictData.error);
+                    }
+        
+                    showMessage(predictData.message);
+                    const resultImage = document.getElementById('result-image');
+                    resultImage.src = '/static/uploads/' + predictData.result_image;
+                    resultImage.style.display = 'block';
+                    updateMap(predictData.gps_data);
+                }
+        
+            } catch (error) {
+                showMessage(error.message, true);
+                showGPSMessage('', false);
+            }
+        };
+    </script>
+    
+</body>
+</html>
